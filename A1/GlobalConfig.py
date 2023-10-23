@@ -18,3 +18,4 @@ class Config:
         self.fps = 30
         # True when doing ex3
         self.Y_only_mode = True
+        self.I_Period = 10  # 设置I帧的周期，例如每隔10个帧一个I帧

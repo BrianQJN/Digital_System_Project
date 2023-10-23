@@ -100,6 +100,88 @@ class Encoder:
                 frames.append(frame_info)
 
         return frames
+    
+
+    def encode_p_frame(self, Y_frame, reference_frame, motion_vectors, QP):
+        frame_height = self.config.height
+        frame_width = self.config.width
+        block_size = self.config.block_size
+        frames = []
+
+        for i in range(0, frame_height, block_size):
+            for j in range(0, frame_width, block_size):
+                block = Block(i, j, block_size, Y_frame)
+
+                # 获取运动矢量
+                motion_vector = motion_vectors.pop(0)
+
+                # 使用运动矢量和参考帧进行运动补偿
+                reference_block = Block(i + motion_vector[0], j + motion_vector[1], block_size, reference_frame)
+                residual_block = block.block_data - reference_block.block_data
+
+                # 执行DCT变换
+                dct_coefficients = self.dct_transform(residual_block)
+
+                # 量化DCT系数
+                quantized_coefficients = self.quantize(dct_coefficients, QP, block_size)
+
+                # TODO: 保存QP值以备将来使用
+
+                frames.append(quantized_coefficients)
+
+        return frames
+    
+
+    # 实现I帧的内部预测（水平或垂直）
+    def encode_i_frame_intra(self, frame_data, QP):
+        frame_height = self.config.height
+        frame_width = self.config.width
+        block_size = self.config.block_size
+        frames = []
+
+        for i in range(0, frame_height, block_size):
+            for j in range(0, frame_width, block_size):
+                block = Block(i, j, block_size, frame_data)
+
+                # 选择水平或垂直模式
+                horizontal_mode = self.horizontal_intra_prediction(block)
+                vertical_mode = self.vertical_intra_prediction(block)
+
+                # 选择MAE成本最低的模式
+                if horizontal_mode['MAE'] < vertical_mode['MAE']:
+                    selected_mode = horizontal_mode
+                else:
+                    selected_mode = vertical_mode
+
+                # 使用选定的模式进行内部预测
+                intra_predicted_block = self.perform_intra_prediction(selected_mode, block)
+
+                # 对内部预测块进行DCT、量化等操作
+                dct_coefficients = self.dct_transform(intra_predicted_block.block_data)
+                quantized_coefficients = self.quantize(dct_coefficients, QP, block_size)
+
+                # 将QP和quantized_coefficients一起存储到一个数据结构中，然后添加到frames列表中
+                frame_info = {'QP': QP, 'coefficients': quantized_coefficients}
+                frames.append(frame_info)
+
+        return frames
+
+    # 实现水平内部预测
+    def horizontal_intra_prediction(self, block):
+        # 水平预测逻辑：使用左边的重建样本进行预测
+        left_border = np.full((block.block_size,), 128, dtype=np.uint8)  # 使用128填充缺失的样本
+        predicted_block = np.tile(left_border, (block.block_size, 1))
+        mae_cost = np.abs(block.block_data - predicted_block).mean()
+        return {'mode': 0, 'MAE': mae_cost}
+
+
+    # 实现垂直内部预测
+    def vertical_intra_prediction(self, block):
+        # 垂直预测逻辑：使用顶部的重建样本进行预测
+        top_border = np.full((1, block.block_size), 128, dtype=np.uint8)  # 使用128填充缺失的样本
+        predicted_block = np.tile(top_border, (block.block_size, 1))
+        mae_cost = np.abs(block.block_data - predicted_block).mean()
+        return {'mode': 1, 'MAE': mae_cost}
 
 
     def encode(self, input_video_path, ws='Assignment/encoder_ws'):
@@ -115,6 +197,7 @@ class Encoder:
         reference_frame = pad_frame(reference_frame, block_size)
         Y_previous = self._construct_virtual_reference_frame((self.config.height, self.config.width), 128)
         Y_previous = pad_frame(Y_previous, block_size)
+        is_i_frame = True # 标志是否是I帧
         # Start encoding
         for k, frame in enumerate(frames):
             # Focus on Y only
@@ -131,10 +214,16 @@ class Encoder:
                         residual_block = self._approximate_residual_block(residual_block)
                         reconstructed_block = self._reconstruct_block_(best_matching_block, residual_block)
 
-                        # 6. 编码I帧
-                        QP = 0  # TODO: 读取QP值，现在设置个default值，我觉得可以写到GlobalConfig里
-                        i_frame_data = self.encode_i_frame(reconstructed_block.block_data, QP)  # 传递QP值给encode_i_frame方法
-                        # TODO: 将i_frame_data保存到文件或传输给解码器
+                        if is_i_frame:
+                            # 6. 编码I帧
+                            QP = 0  # TODO: 读取QP值，现在设置个default值，我觉得可以写到GlobalConfig里
+                            i_frame_data = self.encode_i_frame_intra(Y_frame, QP)  # 传递QP值给encode_i_frame方法
+                            is_i_frame = False
+                            # TODO: 将i_frame_data保存到文件或传输给解码器
+                        else:
+                            # 编码P帧
+                            QP = 0  # TODO: 从配置文件或其他途径获取QP值
+                            p_frame_data = self.encode_p_frame(Y_frame, reference_frame, motion_vectors, QP)
 
                         # dump blocks
                         reconstructed_frame[i:i+block_size, j:j+block_size] = reconstructed_block.block_data
